@@ -1,0 +1,764 @@
+---
+title: "weed and sleep"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Marijuana Use and Sleep Health in the Multicenter AIDS Cohort Study
+
+
+```{r}
+#load libraries
+library(tidyverse)
+library(lmtest)
+library(tableone)
+```
+
+```{r}
+#load data
+library(readr)
+combined_data <- read_csv("combined_data.csv")
+head(combined_data)
+```
+
+## Data Cleaning
+
+The data for medication use prior to sleep is quite messy, as it relied completely on free-text data. I used the code below to do my best to identify relatively common sleep-aides or sleep-altering medicines. One thing that I didn't do is use any type of string distance measurement to capture typos and match those to categories. That would be a bit more of a lift so I thought what I have below is good enough for now. 
+```{r}
+#text data for meds is dirty and needs to be cleaned
+cols <- c("SLPMED1", "SLPMED2", "SLPMED3", "SLPMED4", "SLPMED5", "SLPMED6", "SLPMED7", "SLPMED8", "SLPMED9", "SLPMED10", "SLPMED11", "SLPMED12", "SLPMED13")
+
+# Convert to lowercase
+combined_data[cols] <- lapply(combined_data[cols], str_to_lower)
+
+# Trim whitespace
+combined_data[cols] <- lapply(combined_data[cols], function(x) str_trim(x, side = "both"))
+
+combined_data %>%
+  filter(str_detect(SLPMED1, " "))
+```
+```{r}
+#identify sleep aid meds
+# Define your meds of interest (assumes lowercase already applied)
+sleep_meds_otc <- c("melatonin", "ramelteon")
+
+#prescription sleep meds
+sleep_meds_prescription <- c("remeron", "mirtazapine", "trazadone", "seroquel", "quetiapine", "desyrel", "ambien", "zolpidem", "zaleplon", "sonata", "lunesta")
+
+#benzo
+benzo <- c("temazepam", "alprazolam", "xanax", "restoril", "clonazepam", "klonopin", "lorazepam", "ativan", "flurazepam")
+
+#antihistamines
+antihistamine <- c("diphenhydramine", "benadryl", "hydroxyzine", "atarax", "doxylamine", "unisom")
+
+# Create new column
+combined_data$sleep_aid <- apply(combined_data[cols], 1, function(row) {
+  if (any(grepl(paste(sleep_meds_otc, collapse = "|"), row, ignore.case = TRUE))) {
+    return(1)
+  } else if (any(grepl(paste(sleep_meds_prescription, collapse = "|"), row))) {
+    return(2)
+  } else if (any(grepl(paste(antihistamine, collapse = "|"), row))) {
+    return(3)
+  } else if (any(grepl(paste(benzo, collapse = "|"), row))) {
+    return(4)
+  } else return(5)
+})
+
+# Make it a factor (optional but useful for modeling/plotting)
+combined_data$sleep_aid <- factor(combined_data$sleep_aid, levels = c(1:5),
+                                   labels = c("OTC Sleep Aid", "Prescription sleep aid", "antihistamine", "benzo", "None"))
+
+combined_data %>%
+  mutate(n = 1) %>%
+  group_by(sleep_aid) %>%
+  summarise(use = sum(n))
+
+```
+
+```{r}
+#pull in qualitative data
+#import qol data
+
+# Join the datasets by MACSID and VISIT, keeping only matching rows
+merged_data <- inner_join(combined_data, x19024_qol, by = c("MACSID", "VISIT"))
+
+
+head(merged_data$EMTWBR)
+
+```
+### create variables about marijuana use
+
+MACS asks about marijuana use with a factor variable about average marijuana use since last visit ranging from not at all to daily. To calculate average use, I assigned a number of days to each of the factor levels and then averaged that over either two or four years to determine the average number of days per month of marijuana use over either two (twopotuse) or four (longpotuse) years
+```{r}
+#create marijuana variables
+
+#pull in marijuana data
+library(readr)
+pot_use <- read_csv("~/Downloads/x19024_pot_use(in).csv")
+View(pot_use)
+
+#rename twopotuse and longpotuse because I messed this up before
+
+merged_data %>%
+  rename(old_twopotuse = twopotuse) %>%
+  rename(old_longpotuse = longpotuse)
+
+#create new variable, average potuse
+
+pot_use <- pot_use %>%
+  mutate(avgpotuse = case_when(
+    HASHF == 0 ~ 0,
+    HASHF == 1 ~ 30.5,
+    HASHF == 2 ~ 4.36,
+    HASHF == 3 ~ 1,
+    HASHF == 4 ~ 0.33,
+    is.na(HASHF) ~ NA
+  ))
+
+#summarize average pot use, should go from 0 to 30.5
+pot_use %>%
+  summarise(mean = mean(avgpotuse, na.rm = TRUE), max = max(avgpotuse, na.rm = TRUE))
+
+#determine pot use over two years
+
+pot_use_2 <- pot_use %>% 
+  filter(VISIT %in% c(680, 690, 700, 710)) %>%
+  filter(!is.na(avgpotuse)) %>%
+  group_by(MACSID) %>%
+  summarise(twopotuse = mean(avgpotuse))
+
+head(pot_use_2)
+
+pot_use_2 %>%
+  summarise(mean = mean(twopotuse), max = max(twopotuse))
+
+#determine pot use over 4.5 years (longpotuse)
+pot_use_3 <- pot_use %>% 
+  filter(VISIT %in% c(630, 640, 650, 660, 670, 680, 690, 700, 710)) %>%
+  filter(!is.na(avgpotuse)) %>%
+  group_by(MACSID) %>%
+  summarise(longpotuse = mean(avgpotuse))
+
+head(pot_use_3)
+
+pot_use_3 %>%
+  summarise(mean = mean(longpotuse), max = max(longpotuse))
+
+#join both of these to the data
+
+new_merged_data <- inner_join(merged_data, pot_use_2, by = "MACSID")
+
+newer_merged_data <- inner_join(new_merged_data, pot_use_3, by = "MACSID")
+```
+
+```{r}
+#data cleaning for other variables
+
+newer_merged_data <- newer_merged_data %>%
+  rename(longpotuse = longpotuse.y) %>%
+  rename(twopotuse = twopotuse.y)
+
+weed_data <- newer_merged_data %>%
+  select(MACSID, RACE, SEROSTAT, EDUCA2, INCOMNEW, SMOKE, longpotuse, twopotuse, slplat, remlat, SLPWEED, remdur, n3dur, n1dur, n2dur, tstmin, ESSSCORE, PSQIRATE, EMTWBR, sleep_aid)
+
+glimpse(weed_data)
+
+#factor variables to recode
+cols <- c("RACE", "SEROSTAT", "EDUCA2", "INCOMNEW", "SMOKE", "SLPWEED")
+
+weed_data[cols] <- lapply(weed_data[cols], as.factor)
+str(weed_data)
+```
+### Missing Data
+
+As is my experience with MACS data, there is a fair amount of missing data for some of the qualitative things we are interested in. 22% of respondents did not have data about marijuana use over the past 2 years (twopotuse) and that number increases to 44% over 4 years (longpotuse). Since those are averages and one's marijuana consumption most likely doesn't change that much over time, we could impute those values. 
+
+Missingness for the rest of the variables actually looks pretty good, including for marijuana use prior to sleep (SLPWEED). 
+
+
+
+```{r}
+#visualize missing data
+
+#examine this dataset for missing data
+sapply(weed_data, function(x) sum(is.na(x)))
+
+#bar graph of missing values
+freqDf <- data.frame(table(is.na(weed_data)))
+
+# barplot for visualization
+
+barplot(freqDf$Freq , main = "Total Missing values",
+xlab = "Missing Data", ylab = "Frequency",
+
+names.arg = c("FALSE","TRUE"),
+col = c("#80dfff","lightgreen"))
+
+# legend for barplot
+
+legend("topright",
+c("Non-Missing Values","Missing Values"),
+fill = c("#80dfff","lightgreen"))
+
+#install visdat
+install.packages("visdat")
+library(visdat)
+
+vis_miss(weed_data)
+
+#fair amount is missing for twopotuse and longpotuse
+
+weed_data %>%
+  select(twopotuse, longpotuse) %>%
+  mutate(n = 1) %>%
+  summarise(
+    two_missing = sum(is.na(twopotuse)),
+    long_missing = sum(is.na(longpotuse)), 
+    percent_missing_two = two_missing/sum(n),
+    percent_missing_long = long_missing/sum(n)
+  )
+
+#so missing 22% two-year and 44% longer
+```
+
+What we see below is that for when marijuana use was missing over 2 or 4 years compared to not, the medians of things we are interested in were more or less unchanged, so that is encouraging that our data seems to be misssing more or less at random. 
+
+For missing data on use prior to sleep, there was a little bit more there in terms of differences, but those differences don't hold up to a t-test. 
+
+```{r}
+#patterns of missingness
+
+weed_data %>%
+  select(twopotuse, longpotuse, slplat, remlat, remdur, tstmin, ESSSCORE, PSQIRATE) %>%
+  mutate(miss_twopot = is.na(twopotuse)) %>%
+  group_by(miss_twopot) %>%
+  summarise(across(everything(), median, na.rm = TRUE))
+
+#overall seems pretty similar for twopotuse
+
+weed_data %>%
+  select(twopotuse, longpotuse, slplat, remlat, remdur, tstmin, ESSSCORE, PSQIRATE) %>%
+  mutate(miss_longpot = is.na(longpotuse)) %>%
+  group_by(miss_longpot) %>%
+  summarise(across(everything(), median, na.rm = TRUE))
+
+#and for longpotuse
+
+#use prior to sleep
+weed_data %>%
+  select(SLPWEED, twopotuse, longpotuse, slplat, remlat, remdur, tstmin, ESSSCORE, PSQIRATE) %>%
+  mutate(miss_potuse = is.na(SLPWEED)) %>%
+  group_by(miss_potuse) %>%
+  summarise(across(everything(), median, na.rm = TRUE))
+
+# a little bit more there in terms of difference
+weed_missing <- weed_missing %>%
+  mutate(miss_potuse = is.na(SLPWEED))
+
+t.test(remlat~miss_potuse, weed_missing)
+
+t.test(tstmin~miss_potuse, weed_missing)
+
+```
+
+```{r}
+#looking at the missing values for categorical variables
+
+weed_missing <- weed_data %>%
+  mutate(miss_longpot = is.na(longpotuse),
+         miss_twopot = is.na(twopotuse))
+
+myVars <- c("RACE", "miss_twopot", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+catVars <- c("RACE", "miss_twopot", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+missing_table_1 <- CreateTableOne(vars = myVars, weed_missing, factorVars = catVars, strata = c("miss_twopot"))
+missing_table_1
+
+myVars <- c("RACE", "miss_longpot", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+catVars <- c("RACE", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+missing_table_2 <- CreateTableOne(vars = myVars, weed_missing, factorVars = catVars, strata = c("miss_longpot"))
+missing_table_2
+
+#overall looks good with slight education difference with longpot and more HIV positive people missing
+
+```
+
+Looking at missingness by categorical variables, we don't really see any differences there other than with education. Again, if this were an issue I think it would be reasonable to correct with imputation and we could always add that in for sensitivity analyses. 
+
+### Missing Data for depression/anxiety
+
+Where we have our biggest missing data issue is with our mental health measures. Right now what I have is the 36-item short form health survey. This was recommended to use on the original concept sheet because people thought that things like pain might contribute to poor sleep and we should have a way to capture that. 
+
+That's all well and good, and there is evidence of correlating scores from the SF short form to other measures of depression and anxiety. The issue is that there's quite a bit of missing data for the emotional well-being sub-score that we would need. 
+
+```{r}
+#missing data for emotional wellbeing
+weed_data %>%
+  select(EMTWBR) %>%
+  mutate(n = 1) %>%
+  summarise(
+    missing = sum(is.na(EMTWBR)),
+    percent_missing = missing/sum(n)
+  )
+```
+62% of people didn't have full responses here, yikes! Although it looks like there are not a lot of differences based on missing or not other than potentially some differences by race. 
+
+```{r}
+#emotional well-being yes vs no and outcomes of interest
+
+weed_data %>%
+  select(EMTWBR, slplat, remlat, remdur, tstmin, ESSSCORE, PSQIRATE) %>%
+  mutate(missing = is.na(EMTWBR)) %>%
+  group_by(missing) %>%
+  summarise(across(everything(), median, na.rm = TRUE))
+```
+
+```{r}
+#missing data for emotional well-being and categorical variables
+
+weed_missing <- weed_data %>%
+  mutate(missing = is.na(EMTWBR))
+
+myVars <- c("RACE", "missing", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+catVars <- c("RACE", "missing", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE")
+
+missing_table_3 <- CreateTableOne(vars = myVars, weed_missing, factorVars = catVars, strata = c("missing"))
+missing_table_3
+```
+
+
+
+## Data Visualization
+
+What we see in the table one is a fair proportion of people using marijuana before their sleep study (about 10%), but relatively low use averaged over 2 and 4 years, with patients using marijuana, on average, one half day per month. 
+
+### Table 1
+
+```{r}
+#table 1
+
+myVars <- c("RACE", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE", "SLPWEED", "longpotuse", "twopotuse", "slplat", "remlat", "remdur", "n1dur", "n2dur", "n3dur", "tstmin", "ESSSCORE", "PSQIRATE", "sleep_aid" )
+
+catVars <- c("RACE", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE", "sleep_aid")
+
+table_1 <- CreateTableOne(vars = myVars, data = weed_data, factorVars = catVars)
+table_1
+
+```
+### Table 1 Stratified by Marijuana use prior to sleep
+
+There are some differences here; in some of the demographic characeteristics as well as with rem latency
+
+```{r}
+table_1_weed_strat <- CreateTableOne(vars = myVars, data = weed_data, factorVars = catVars, strata = "SLPWEED")
+table_1_weed_strat
+```
+
+
+
+### Table 1 Stratified by HIV status
+
+When stratified by HIV status, there's a small difference in sleep latency and a slightly higher proportion of current smokers, though no difference in marijuana use prior to sleep.
+```{r}
+#stratified by HIV status
+table_1_strat <- CreateTableOne(vars = myVars, data = weed_data, factorVars = catVars, strata = "SEROSTAT")
+table_1_strat
+```
+### How much marijuana are the users using?
+Looking at average marijuana usage, I was thinking that there are a lot of people who most likely didn't use any marijuana over a 2 year period and that is bringing the average down. In fact, 483 (65%) of the cohort didn't use any at all. 
+
+When looking specifically at patients who reported marijuana use, usage was a little bit higher at 9 days per month
+
+
+```{r}
+
+weed_data %>%
+  filter(twopotuse == 0) %>%
+  count()
+
+
+weed_data %>%
+  filter(twopotuse > 0) %>%
+  summarise(median_twopotuse = median(twopotuse),
+            mean_twopotuse = mean(twopotuse, na.rm = TRUE),
+            max = max(twopotuse))
+```
+
+
+
+
+```{r}
+#data visualization by weed use
+weed_data %>%
+  group_by(SLPWEED) %>%
+  summarise(med_lat = median(slplat),
+            med_rem_lat = median(remlat, na.rm = TRUE), 
+            med_tst = median(tstmin),
+            med_remdur = median(remdur),
+            med_esss = median(ESSSCORE))
+
+tst_plot <- weed_data %>%
+  ggplot(aes(x = SLPWEED, y = tstmin)) +
+  geom_boxplot()
+
+remlat_plot <- weed_data %>%
+  ggplot(aes(x = SLPWEED, y = remlat)) +
+  geom_boxplot()
+
+remdur_plot <- weed_data %>%
+  ggplot(aes(x = SLPWEED, y = remdur)) +
+  geom_boxplot()
+
+
+
+weed_data %>%
+  filter(is.na(SLPWEED) == FALSE) %>%
+  pivot_longer(cols = c(remdur, n1dur, n2dur, n3dur),
+               names_to = "Stage",
+               values_to = "Duration") %>%
+  group_by(SLPWEED, Stage) %>%
+  summarise(
+    mean_duration = mean(Duration, na.rm = TRUE),
+    se = sd(Duration, na.rm = TRUE) / sqrt(sum(!is.na(Duration))),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = Stage, y = mean_duration, fill = SLPWEED)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = mean_duration - se, ymax = mean_duration + se),
+                position = position_dodge(width = 0.9),
+                width = 0.2) +
+  labs(x = "Sleep Stage", y = "Average Duration", fill = "SLPWEED") +
+  theme_minimal()
+
+
+
+```
+
+
+
+
+
+```{r}
+#visulization, twopotuse
+
+weed_data %>%
+  group_by(twopotuse) %>%
+  summarise(med_lat = median(slplat),
+            med_rem_lat = median(remlat), 
+            med_tst = median(tstmin),
+            med_remdur = median(remdur),
+            med_esss = median(ESSSCORE))
+
+ggplot(weed_data, aes(x = twopotuse, y = slplat)) +
+  geom_line()
+
+ggplot(weed_data, aes(x = twopotuse, y = tstmin)) +
+  geom_line()
+```
+## Data Analysis
+
+### Relationship between use before sleep and outcomes
+```{r}
+#modeling
+
+#create gaussian function
+gaussian_model <- function(x) {
+  model <- glm(x ~ SLPWEED + RACE + SEROSTAT + SMOKE + EDUCA2 + sleep_aid + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+}
+
+#sleep latency
+
+ sleep_latency <- gaussian_model(weed_data$slplat)
+
+#rem latency
+ 
+ rem_latency <- gaussian_model(weed_data$remlat)
+
+#tst
+tst <- gaussian_model(weed_data$tstmin)
+
+# no differences but very wide confidence intervals; will try some recoding to clean up
+```
+
+```{r}
+#collapsing some categorical variables
+
+library(forcats)
+
+weed_data <- weed_data %>%
+  mutate(race_collapsed = fct_collapse(RACE,
+                                       White = 1,
+                                       Black = 2,
+                                       Hispanic = c(2, 4, 8),
+                                       Other = c(5, 6, 7)),
+         schooling = fct_collapse(EDUCA2,
+                                  'Less than HS' = c(1, 2),
+                                  'HS or some college' = c(3, 4, 5),
+                                  'College or more' = c(6, 7, 8)),
+         sleep_aid_collapsed = fct_collapse(sleep_aid,
+                                            'Used Sleep Aid' = c("OTC Sleep Aid", "Prescription sleep aid", "antihistamine", "benzo"),
+                                            'Did not use' = "None"))
+
+```
+
+### Relationship between Use before sleep and outcomes with collapsed categoricals
+```{r}
+#try modeling again
+
+gaussian_model <- function(x) {
+  model <- glm(x ~ SLPWEED + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+}
+#sleep latency
+
+ sleep_latency <- gaussian_model(weed_data$slplat)
+
+#rem latency
+ 
+ rem_latency <- gaussian_model(weed_data$remlat)
+
+#tst
+tst <- gaussian_model(weed_data$tstmin)
+
+psqi <- gaussian_model(weed_data$PSQIRATE)
+
+esss <- gaussian_model(weed_data$ESSSCORE)
+
+#still getting some decently wide confidence intervals
+```
+### relationship between longitudinal pot use and outcomes
+```{r}
+#look at longitudinal pot use
+gaussian_model_twopot <- function(x) {
+  model <- glm(x ~ twopotuse + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+}
+#sleep latency
+
+ sleep_latency_twopot <- gaussian_model_twopot(weed_data$slplat)
+
+#rem latency
+ 
+ rem_latency_twopot <- gaussian_model_twopot(weed_data$remlat)
+
+#tst
+tst_twopot <- gaussian_model_twopot(weed_data$tstmin)
+
+#psqi
+psqi_twopot <- gaussian_model_twopot(weed_data$PSQIRATE)
+
+```
+
+### interaction between before sleep and long-term use
+
+Looks like there are 215 people who reported use over two years who did not use marijuana before sleep on the night of their sleep study
+
+```{r}
+#any interaction between twopot and immediate pot
+
+#cross tabs between chronic pot use and use before sleep
+
+weed_data %>%
+  mutate(chronic_pot = ifelse(twopotuse > 0, 1, 2)) %>%
+  group_by(chronic_pot) %>%
+  count(SLPWEED)
+
+weed_data %>%
+  mutate(chronic_pot = ifelse(twopotuse > 0, 1, 2)) %>%
+  group_by(chronic_pot) %>%
+  summarise(mean_use = mean(twopotuse))
+
+gaussian_model_interaction <- function(x) {
+  model <- glm(x ~ SLPWEED + twopotuse + SLPWEED*twopotuse + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+}
+#sleep latency
+
+ sleep_latency_int <- gaussian_model_interaction(weed_data$slplat)
+
+#rem latency
+ 
+ rem_latency_int <- gaussian_model_interaction(weed_data$remlat)
+
+#tst
+tst_int <- gaussian_model_interaction(weed_data$tstmin)
+
+#psqi
+psqi_int <- gaussian_model_interaction(weed_data$PSQIRATE)
+```
+```{r}
+#what about use and n1 duration (will take out emotional wellbeing for now)
+
+model <- glm(n1dur ~ SLPWEED + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+```
+
+```{r}
+
+model <- glm(seslponset ~ SLPWEED + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + EMTWBR, data = weed_data, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+
+```
+
+### use before sleep when limited to chronic users
+
+interesting; if you look only at chronic users, there is a relationship between use before sleep and rem latency (in unadjusted model at least)
+```{r}
+weed_data_chronic <- weed_data %>%
+  mutate(chronic_pot = ifelse(twopotuse > 0, 1, 2)) %>%
+  filter(chronic_pot == 1) %>%
+  filter(!is.na(SLPWEED))
+
+#can't get this to run and i suspsect it's due to small samples in some cells
+chronic_use_model <- gaussian_model(weed_data_chronic$remlat)
+
+#try breaking it down
+model <- glm(remlat ~ SLPWEED, data = weed_data_chronic, family = "gaussian")
+model_ci <- confint(model)
+model_results <- exp(cbind(OR = coef(model), model_ci))
+
+#psqi
+model_2 <- glm(PSQIRATE ~ SLPWEED, data = weed_data_chronic, family = "gaussian")
+model_ci_2 <- confint(model_2)
+model_results_2 <- exp(cbind(OR = coef(model_2), model_ci_2))
+```
+
+
+```{r}
+#try to make wake after sleep onset variable
+new_weed_data <- newer_merged_data %>%
+  select(MACSID, RACE, SEROSTAT, EDUCA2, INCOMNEW, SMOKE, longpotuse, twopotuse, slplat, remlat, SLPWEED, remdur, n3dur, n1dur, n2dur, tstmin, ESSSCORE, PSQIRATE, EMTWBR, sleep_aid, recorddurm, seslponset)
+
+#?sleep efficiency = sleep efficiency in sleep onset to wake
+#seslponset if so equals sleep efficiency
+
+#to calculate waso WASO = (1 – Sleep Efficiency)*(Total Recording Time) – Sleep Latency
+                 #Or WASO = (1-Sleep Efficiency)/(Sleep Efficiency)* [Total Sleep Time]– Sleep Latency
+
+#1-
+
+#total recording time = recorddurmin
+#sleep latency = slplat
+#total sleep time = tstmin
+
+
+```
+
+Brett's interest: 
+
+How do things change among the high users
+-histogram of chronic use by use on the sleep study night
+-more psqi and esss visualization
+-can look more into psqi dimensions, particularly sleep quality
+-how does pain affect that
+
+```{r}
+#table for Sanjay to figure out sleep variablels
+new_weed_data %>%
+  select(tstmin, recorddurm, slplat, seslponset) %>%
+  head(n = 20)
+
+```
+### Identify antidepressant use
+
+```{r}
+#antidepressant use
+ssri <- c("citalopram", "celexa", "escitalopram", "lexapro", "fluoxetine", "prozac", "paroxetine", "paxil", "sertraline", "zoloft")
+
+snri <- c("desvenlafaxine", "pristiq", "duloxetine", "cymbalta", "venlafaxine", "effexor")
+
+tca <- c("amitriptyline", "elavil", "clomipramine", "anafranil", "desipramine", "norpramine", "doxepin", "sinequan", "imipramine", "tofranil", "nortriptyline", "pamelor")
+
+maoi <- c("isocarboxazid", "marplan", "phenelzine", "nardil", "tranylcypromine", "parnate", "selegiline", "emsam", "rasagiline", "azilect")
+
+#text data for meds is dirty and needs to be cleaned
+cols <- c("SLPMED1", "SLPMED2", "SLPMED3", "SLPMED4", "SLPMED5", "SLPMED6", "SLPMED7", "SLPMED8", "SLPMED9", "SLPMED10", "SLPMED11", "SLPMED12", "SLPMED13")
+
+# Convert to lowercase
+newer_merged_data[cols] <- lapply(new_merged_data[cols], str_to_lower)
+
+# Trim whitespace
+newer_merged_data[cols] <- lapply(newer_merged_data[cols], function(x) str_trim(x, side = "both"))
+
+# Create new column
+newer_merged_data$antidepressant_use <- apply(newer_merged_data[cols], 1, function(row) {
+  if (any(grepl(paste(ssri, collapse = "|"), row, ignore.case = TRUE))) {
+    return(1)
+  } else if (any(grepl(paste(snri, collapse = "|"), row))) {
+    return(2)
+  } else if (any(grepl(paste(tca, collapse = "|"), row))) {
+    return(3)
+  } else if (any(grepl(paste(maoi, collapse = "|"), row))) {
+    return(4)
+  } else return(5)
+})
+
+# Make it a factor (optional but useful for modeling/plotting)
+newer_merged_data$antidepressant_use <- factor(newer_merged_data$antidepressant_use, levels = c(1:5),
+                                   labels = c("ssri", "snri", "tca", "maoi", "None"))
+
+newer_merged_data %>%
+  mutate(n = 1) %>%
+  group_by(antidepressant_use) %>%
+  summarise(use = sum(n))
+```
+
+That proportion of use seems really low and I'm worried that's because we are only capturing use before sleep that people would have had to manually enter
+
+### WASO
+
+```{r}
+#create waso variable
+
+#calcualte sleep period time
+
+newer_merged_data <- newer_merged_data %>%
+  mutate(spt = ((tstmin*100)/seslponset)+0.5) %>%
+  mutate(waso = (spt - tstmin))
+
+#visualize waso
+
+newer_merged_data %>%
+  ggplot(aes(waso)) +
+  geom_histogram()
+
+#stratify by slpweed
+newer_merged_data %>%
+  filter(!is.na(SLPWEED)) %>%
+  group_by(SLPWEED) %>%
+  ggplot(aes(waso)) +
+  geom_histogram()
+  
+#summarize
+newer_merged_data %>%
+  filter(!is.na(SLPWEED)) %>%
+  group_by(SLPWEED) %>%
+    summarise(mean_waso = mean(waso),
+              median_waso = median(waso))
+
+```
+
+```{r}
+#WASO related to weed use before sleep
+
+ waso_before_sleep <- glm(waso ~ SLPWEED + RACE + SEROSTAT + SMOKE + EMTWBR, data = newer_merged_data, family = "gaussian")
+
+summary(waso_before_sleep)
+
+waso_twopot <- glm(waso ~ twopotuse + RACE + SEROSTAT + SMOKE + EMTWBR, data = newer_merged_data, family = "gaussian")
+
+summary(waso_twopot)
+```
+
