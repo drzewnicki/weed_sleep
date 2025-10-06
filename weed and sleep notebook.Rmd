@@ -717,6 +717,31 @@ newer_merged_data %>%
 
 That proportion of use seems really low and I'm worried that's because we are only capturing use before sleep that people would have had to manually enter
 
+### merge in final data
+
+will merge in antidepressant use that Deanna identified; is more broad then we need but I think better to be more comprehensive
+
+```{r}
+#load required package
+install.packages("haven")
+library(haven)
+
+antidepressant <- read_sas("poly_data_analysis (1).sas7bdat")
+
+str(antidepressant)
+
+antidepressant %>%
+  distinct(VISIT)
+
+# sadly this only goes up to visit 65 which is too early
+
+antidepressant %>%
+  filter(VISIT == 650) %>%
+  count(AD)
+
+```
+
+
 ### WASO
 
 ```{r}
@@ -760,5 +785,129 @@ summary(waso_before_sleep)
 waso_twopot <- glm(waso ~ twopotuse + RACE + SEROSTAT + SMOKE + EMTWBR, data = newer_merged_data, family = "gaussian")
 
 summary(waso_twopot)
+```
+```{r}
+# visits needed
+
+newer_merged_data %>%
+  group_by(VISIT) %>%
+  count()
+
+
+```
+```{r}
+newer_merged_data %>%
+  filter(AGENOX < 40) %>%
+  nrow()
+
+```
+
+### CESD
+```{r}
+
+#read in data
+
+cesd <- read_csv("data_request_07192025.csv")
+
+#merge in CESD
+newest_merged_data <- newer_merged_data %>%
+  left_join(cesd, by = c("MACSID", "VISIT"))
+
+newest_merged_data %>%
+  sum(is.na(CESD))
+
+#264 missing is a fair amount
+```
+
+### addressing missing data for AD use and CESD
+
+for cesd, could impute with mean or use alternative visit when available. for antidepressant use, would have to either get MACS medication data or could use based on visit 65
+
+## final analysis
+
+need to take out smoking and add in age
+
+```{r}
+# collapse antidepressant before sleep
+
+newest_merged_data <- newest_merged_data %>%
+  mutate(AD_use_dichot = ifelse(antidepressant_use == "None",1, 2))
+
+
+
+#redo categorical collapsing
+
+final_data <- newest_merged_data %>%
+  mutate(RACE = as.factor(RACE),
+         EDUCA2 = as.factor(EDUCA2)) %>%
+  mutate(race_collapsed = fct_collapse(RACE,
+                                       White = 1,
+                                       Black = 3,
+                                       Hispanic = c(2, 4, 8),
+                                       Other = c(5, 6, 7)),
+         schooling = fct_collapse(EDUCA2,
+                                  'Less than HS' = c(1, 2),
+                                  'HS or some college' = c(3, 4, 5),
+                                  'College or more' = c(6, 7, 8)),
+         sleep_aid_collapsed = fct_collapse(sleep_aid,
+                                            'Used Sleep Aid' = c("OTC Sleep Aid", "Prescription sleep aid", "antihistamine", "benzo"),
+                                            'Did not use' = "None"))
+
+final_data %>%
+  count(race_collapsed)
+
+#make new model function
+final_model <- function(x) {
+  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + factor(SMOKE) + schooling + sleep_aid_collapsed + CESD + factor(AD_use_dichot), data = final_data, family = "gaussian")
+resuls <- tidy(model, conf.int = TRUE)
+}
+
+#just 32 missing for slpweed in final data, should i just exclude those people?
+```
+
+```{r}
+#remlatency
+
+rem_latency <- final_model(final_data$remlat)
+rem_latency
+
+```
+```{r}
+#WASO
+final_data <- final_data %>%
+  mutate(spt = ((tstmin*100)/seslponset)+0.5) %>%
+  mutate(waso = (spt - tstmin))
+
+waso <- final_model(final_data$waso)
+waso
+```
+```{r}
+#psqi sleep quality
+
+psqi <- final_model(final_data$PSQIRATE)
+psqi
+```
+```{r}
+#final data and twopot
+
+#make twopot function
+final_model_twopot <- function(x) {
+  model <- glm(x ~ twopotuse.y + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + CESD + AD_use_dichot, data = final_data, family = "gaussian")
+resuls <- tidy(model, conf.int = TRUE)
+}
+
+twopot_remlat <- final_model_twopot(final_data$remlat)
+twopot_remlat
+```
+```{r}
+#twopot and waso
+
+waso_twopot <- final_model_twopot(final_data$waso)
+waso_twopot
+```
+
+```{r}
+psqi_twopot <- final_model_twopot(final_data$PSQIRATE)
+psqi_twopot
 ```
 
