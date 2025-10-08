@@ -858,7 +858,7 @@ final_data %>%
 
 #make new model function
 final_model <- function(x) {
-  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + factor(SMOKE) + schooling + sleep_aid_collapsed + CESD + factor(AD_use_dichot), data = final_data, family = "gaussian")
+  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + AGENOX + schooling + relevel(sleep_aid_collapsed, ref = "Did not use") + CESD + factor(AD_use_dichot), data = final_data, family = "gaussian")
 resuls <- tidy(model, conf.int = TRUE)
 }
 
