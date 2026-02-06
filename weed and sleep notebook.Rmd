@@ -817,6 +817,13 @@ newest_merged_data %>%
   sum(is.na(CESD))
 
 #264 missing is a fair amount
+
+newer_merged_data %>%
+  summarise(mean_twopot = mean(twopotuse.y))
+
+newer_merged_data %>%
+  filter(twopotuse.y > 0) %>%
+  summarise(mean_twopot = mean(twopotuse.y))
 ```
 
 ### addressing missing data for AD use and CESD
@@ -828,16 +835,10 @@ for cesd, could impute with mean or use alternative visit when available. for an
 need to take out smoking and add in age
 
 ```{r}
-# collapse antidepressant before sleep
-
-newest_merged_data <- newest_merged_data %>%
-  mutate(AD_use_dichot = ifelse(antidepressant_use == "None",1, 2))
-
-
 
 #redo categorical collapsing
 
-final_data <- newest_merged_data %>%
+almost_final_data <- newest_merged_data %>%
   mutate(RACE = as.factor(RACE),
          EDUCA2 = as.factor(EDUCA2)) %>%
   mutate(race_collapsed = fct_collapse(RACE,
@@ -851,18 +852,144 @@ final_data <- newest_merged_data %>%
                                   'College or more' = c(6, 7, 8)),
          sleep_aid_collapsed = fct_collapse(sleep_aid,
                                             'Used Sleep Aid' = c("OTC Sleep Aid", "Prescription sleep aid", "antihistamine", "benzo"),
-                                            'Did not use' = "None"))
+                                            'Did not use' = "None"),
+         cesd_dichot = ifelse(CESD < 16, 1, 2),
+         cesd_factor = as.factor(cesd_dichot))
 
-final_data %>%
+almost_final_data %>%
   count(race_collapsed)
+
+
+#just 32 missing for slpweed in final data, should i just exclude those people?
+```
+
+```{r}
+#create final dataset
+nearly_final_data <- almost_final_data %>%
+  select(AGENOX, SLPWEED, race_collapsed, SEROSTAT, schooling, sleep_aid_collapsed, CESD, cesd_factor, twopotuse.y, remlat, PSQIRATE, tstmin, seslponset, SMOKE, slplat) %>%
+  rename(twopotuse = twopotuse.y) %>%
+  #WASO
+  mutate(spt = ((tstmin*100)/seslponset)+0.5,
+         waso = spt-tstmin)
+```
+
+```{r}
+#missing data in this dataset
+
+
+str(nearly_final_data)
+
+
+#clean variable types
+nearly_final_data <- nearly_final_data %>%
+  mutate(SEROSTAT = as.factor(SEROSTAT),
+         SLPWEED = as.factor(SLPWEED),
+         PSQIRATE = as.factor(PSQIRATE))
+
+miss_var_summary(nearly_final_data)
+
+```
+
+```{r}
+#take out people who don't have slpweed, don't want to impute that
+
+nearly_final_data <- nearly_final_data %>%
+  filter(!is.na(SLPWEED))
+```
+
+```{r}
+#make sure things look good in this dataset
+#remlat
+summary(nearly_final_data$remlat)
+
+nearly_final_data %>%
+  ggplot(aes(x = remlat)) +
+  geom_histogram()
+```
+Right skewed witha. few outliers
+
+```{r}
+#sleep latency
+summary(nearly_final_data$slplat)
+
+nearly_final_data %>%
+  ggplot(aes(x = slplat)) +
+  geom_histogram()
+```
+also right skewed with a few outliers
+
+```{r}
+#psqirate
+
+summary(nearly_final_data$PSQIRATE)
+```
+###final data cleaning
+
+questions for prior to analysis
+- remove outliers from remlat and sleep latency
+- impute and fit sleep latency and psqi rate
+- remove those with missing rem latency and fit one more time
+
+```{r}
+#impute data for cesd
+
+# Check which variables correlate with CESD
+# Calculate correlations and sort by strength
+numeric_data <- nearly_final_data[, sapply(nearly_final_data, is.numeric)]
+correlations <- cor(numeric_data, use = "pairwise.complete.obs")[, "CESD"]
+correlations <- sort(abs(correlations), decreasing = TRUE)
+print(correlations)
+
+#associations with categorical variables
+#slpweed
+ggplot(nearly_final_data, aes(x = SLPWEED, y = CESD)) +
+  geom_boxplot()
+
+#race
+ggplot(nearly_final_data, aes(x = race_collapsed, y = CESD)) +
+  geom_boxplot()
+
+#serostat
+ggplot(nearly_final_data, aes(x = SEROSTAT, y = CESD)) +
+  geom_boxplot()
+
+
+
+```
+
+
+```{r}
 
 #make new model function
 final_model <- function(x) {
-  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + AGENOX + schooling + relevel(sleep_aid_collapsed, ref = "Did not use") + CESD + factor(AD_use_dichot), data = final_data, family = "gaussian")
+  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + AGENOX + schooling + relevel(sleep_aid_collapsed, ref = "Did not use") + cesd_factor, data = final_data, family = "gaussian")
 resuls <- tidy(model, conf.int = TRUE)
 }
+```
 
-#just 32 missing for slpweed in final data, should i just exclude those people?
+
+```{r}
+#final data demographics
+
+final_data %>%
+  summarise(mean_age = mean(AGENOX),
+            proportion_white = (sum(race_collapsed == "White")/nrow(final_data)),
+            mean_psqi = mean(PSQISCORE, na.rm = TRUE))
+
+#proprotion of use by HIV status
+
+chisq.test(final_data$SLPWEED, final_data$SEROSTAT)
+
+table(final_data$SLPWEED, final_data$SEROSTAT)
+
+sum(is.na(final_data$waso))
+
+sum(is.na(final_data$remlat))
+
+sum(is.na(final_data$PSQIRATE))
+
+final_data
+
 ```
 
 ```{r}
@@ -873,13 +1000,7 @@ rem_latency
 
 ```
 ```{r}
-#WASO
-final_data <- final_data %>%
-  mutate(spt = ((tstmin*100)/seslponset)+0.5) %>%
-  mutate(waso = (spt - tstmin))
 
-waso <- final_model(final_data$waso)
-waso
 ```
 ```{r}
 #psqi sleep quality
@@ -909,5 +1030,9 @@ waso_twopot
 ```{r}
 psqi_twopot <- final_model_twopot(final_data$PSQIRATE)
 psqi_twopot
+```
+
+```{r}
+
 ```
 
