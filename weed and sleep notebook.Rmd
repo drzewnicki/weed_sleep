@@ -342,11 +342,11 @@ What we see in the table one is a fair proportion of people using marijuana befo
 ```{r}
 #table 1
 
-myVars <- c("RACE", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE", "SLPWEED", "longpotuse", "twopotuse", "slplat", "remlat", "remdur", "n1dur", "n2dur", "n3dur", "tstmin", "ESSSCORE", "PSQIRATE", "sleep_aid" )
+myVars <- c("race_collapsed", "SEROSTAT",  "schooling",  "AGENOX", "SLPWEED", "twopotuse", "slplat", "remlat", "remdur", "waso", "PSQIRATE", "on_antidepressant")
 
-catVars <- c("RACE", "SEROSTAT",  "EDUCA2",  "INCOMNEW", "SMOKE", "sleep_aid")
+catVars <- c("race_collapsed", "SEROSTAT",  "schooling", "on_antidepressant")
 
-table_1 <- CreateTableOne(vars = myVars, data = weed_data, factorVars = catVars)
+table_1 <- CreateTableOne(vars = myVars, data = complete_cases, factorVars = catVars)
 table_1
 
 ```
@@ -866,7 +866,7 @@ almost_final_data %>%
 ```{r}
 #create final dataset
 nearly_final_data <- almost_final_data %>%
-  select(AGENOX, SLPWEED, race_collapsed, SEROSTAT, schooling, sleep_aid_collapsed, CESD, cesd_factor, twopotuse.y, remlat, PSQIRATE, tstmin, seslponset, SMOKE, slplat) %>%
+  select(MACSID, VISIT, AGENOX, SLPWEED, race_collapsed, SEROSTAT, schooling, sleep_aid_collapsed, CESD, cesd_factor, twopotuse.y, remlat, PSQIRATE, tstmin, seslponset, SMOKE, slplat) %>%
   rename(twopotuse = twopotuse.y) %>%
   #WASO
   mutate(spt = ((tstmin*100)/seslponset)+0.5,
@@ -923,6 +923,106 @@ also right skewed with a few outliers
 
 summary(nearly_final_data$PSQIRATE)
 ```
+
+### antidepressant data
+
+```{r}
+#read in new antidepressant data
+file_path <- "/Users/danrzewnicki/Downloads/2026_02_24_X19024.xlsx"
+
+med_data <- read_excel(file_path)
+
+#inspect the data
+str(med_data)
+
+#narrow down to columns that I need
+med_data <- med_data %>%
+  select(MACSID, VISIT, NAME_ENTERED, UNK_DEPRESS)
+
+#make visit values match
+id_visit_lookup <- nearly_final_data %>%
+  select(MACSID, VISIT) %>%
+  mutate(VISIT = as.character(VISIT)) %>%
+  mutate(VISIT = sub("0$", "", VISIT),
+         VISIT = as.numeric(VISIT))
+
+id_visit_lookup <- id_visit_lookup %>%
+  mutate(MACSID = trimws(MACSID),
+         VISIT = trimws(VISIT))
+
+med_data <- med_data %>%
+  mutate(MACSID = trimws(MACSID),
+         VISIT = trimws(VISIT))
+
+#right join to get the right ID-visit combos
+antidepressants <- med_data %>%
+  right_join(id_visit_lookup,  by = c("MACSID" = "MACSID", "VISIT" = "VISIT"))
+
+
+```
+
+```{r}
+#identify antidepressants
+#antidepressant use
+ssri <- c("citalopram", "celexa", "escitalopram", "lexapro", "fluoxetine", "prozac", "paroxetine", "paxil", "sertraline", "zoloft")
+
+snri <- c("desvenlafaxine", "pristiq", "duloxetine", "cymbalta", "venlafaxine", "effexor")
+
+tca <- c("amitriptyline", "elavil", "clomipramine", "anafranil", "desipramine", "norpramine", "doxepin", "sinequan", "imipramine", "tofranil", "nortriptyline", "pamelor")
+
+maoi <- c("isocarboxazid", "marplan", "phenelzine", "nardil", "tranylcypromine", "parnate", "selegiline", "emsam", "rasagiline", "azilect")
+
+#make column uniform
+antidepressants <- antidepressants %>%
+  mutate(name_clean = str_to_lower(NAME_ENTERED),
+         name_clean = str_trim(name_clean, side = "both"))
+
+#all antidepressants
+all_antidepressants <- c(ssri, snri, tca, maoi)
+
+
+# Build a regex pattern from your antidepressant list
+antidep_pattern <- paste(all_antidepressants, collapse = "|")
+
+#identify if med is antidepressant
+
+antidepressants <- antidepressants %>%
+  mutate(
+    # First handle NAs, then check for exact substring match
+    antidep_flag = case_when(
+      is.na(name_clean) ~ 0L,
+      str_detect(name_clean, antidep_pattern) ~ 1L,
+      # Fuzzy match as fallback for misspellings
+      sapply(name_clean, function(x) {
+        any(stringsim(x, all_antidepressants, method = "jw") >= 0.85)
+      }) ~ 1L,
+      TRUE ~ 0L
+    )
+  )
+
+
+
+#summarise to one per ID
+antidep_by_id <- antidepressants %>%
+  group_by(MACSID) %>%
+  summarise(on_antidepressant = as.integer(any(antidep_flag == 1L)))
+
+
+sum(is.na(antidep_by_id$on_antidepressant))
+
+antidep_by_id %>%
+  group_by(on_antidepressant) %>%
+  count()
+
+```
+
+```{r}
+#create final data
+final_data <- nearly_final_data %>%
+  mutate(MACSID = as.character(MACSID)) %>%
+  left_join(antidep_by_id)
+```
+
 ###final data cleaning
 
 questions for prior to analysis
@@ -961,10 +1061,11 @@ ggplot(nearly_final_data, aes(x = SEROSTAT, y = CESD)) +
 ```{r}
 
 #make new model function
-final_model <- function(x) {
-  model <- glm(x ~ factor(SLPWEED) + race_collapsed + factor(SEROSTAT) + AGENOX + schooling + relevel(sleep_aid_collapsed, ref = "Did not use") + cesd_factor, data = final_data, family = "gaussian")
-resuls <- tidy(model, conf.int = TRUE)
+final_model <- function(x, y) {
+  model <- glm(x ~ SLPWEED + race_collapsed + SEROSTAT + AGENOX + schooling + on_antidepressant + cesd_factor, data = y, family = "gaussian")
 }
+
+
 ```
 
 
@@ -992,39 +1093,126 @@ final_data
 
 ```
 
+next things to do: 
+- move model results function
+- rename estimate, term, etc
+
 ```{r}
 #remlatency
+rem_data <- final_data %>%
+  filter(!is.na(remlat))
 
-rem_latency <- final_model(final_data$remlat)
+rem_latency <- final_model(complete_rem$remlat, complete_rem)
 rem_latency
 
+export_model_results(rem_latency, "new_rem_latency_results")
+
+export_model_results <- function(model_results, file_name, output_dir = getwd()) {
+
+formatted_results <- function(outcome) { outcome %>%
+  tidy_and_attach(conf.int = T) %>%
+  tidy_add_reference_rows %>%
+  dplyr::select(term, estimate, conf.low, conf.high, p.value)%>%
+  filter(term != "(Intercept)")%>%
+  mutate(term = case_when(term == "SLPWEED1" ~"Used Cannabis Prior to Sleep",
+                          term == "SLPWEED2" ~ "   Yes",
+                          term == "race_collapsedWhite" ~ "Race",
+                          term == "race_collapsedHispanic"~ "   Hispanic",
+                          term == "race_collapsedBlack" ~ "   Black", 
+                          term == "race_collapsedOther" ~ "   Other",
+                          term == "AGENOX" ~ "Age",
+                          term == "SEROSTAT1" ~ "HIV Serostatus",
+                          term == "SEROSTAT2" ~ "   HIV+",
+                          term == "schoolingLess than HS" ~ "Education Level",
+                          term == "schoolingHS or some college" ~ "   HS or some college",
+                          term == "schoolingCollege or more" ~ "   College or more",
+                          term == "on_antidepressant" ~ "Using antidepressants",
+                          term == "cesd_factor2" ~ "   Yes",
+                          term == "cesd_factor1" ~ "Depression",
+                          T ~ term))%>%
+  mutate(across(c(estimate:conf.high), ~round(., 2)))%>%
+  mutate(p.value = round(p.value, 3),
+         p.value = if_else(p.value <0.001, "<0.01",as.character(p.value)))%>%
+  unite("CI",conf.low, conf.high, sep="-")%>%
+  unite("estimate",estimate, CI, sep= " (")%>%
+  mutate(estimate = str_c(estimate, ")")) %>%
+   mutate(estimate = str_remove_all(estimate, fixed("NA (NA-NA)"))) %>%
+  replace_na(list(p.value = "", estimate = "")) %>%
+  rename(`expression(beta[1])` = estimate,
+                  Coefficient = term)
+ 
+}
+formatted_results
+
+# Build full file path
+  file_path <- file.path(output_dir, paste0(file_name, ".csv"))
+  output_dir <- getwd()
+  
+  # Write to CSV
+  write.csv(formatted_results, file = file_path, row.names = FALSE)
+}
+
+  #mutate(term = factor(term, levels=c("Piperacillin-tazobactam",
+                                      "Piperacillin-tazobactam:wbc","wbc",
+                                      "charlson_score","sofa_max_24bcx","decade",
+                                      "non_white","female","time_to_rx","First-stage residual"
 ```
+
 ```{r}
+#sleep latency
+sleep_latency <- final_model(complete_cases$slplat, complete_cases)
+
+sleep_latency_results <- formatted_results(sleep_latency)
+
+sleep_latency_results
 
 ```
+
+```{r}
+#waso
+waso <- final_model(complete_cases$waso, complete_cases)
+
+waso_results <- formatted_results(waso)
+
+waso_results
+```
+
 ```{r}
 #psqi sleep quality
 
 psqi <- final_model(final_data$PSQIRATE)
 psqi
 ```
+
+
 ```{r}
 #final data and twopot
 
 #make twopot function
-final_model_twopot <- function(x) {
-  model <- glm(x ~ twopotuse.y + race_collapsed + SEROSTAT + SMOKE + schooling + sleep_aid_collapsed + CESD + AD_use_dichot, data = final_data, family = "gaussian")
-resuls <- tidy(model, conf.int = TRUE)
+final_model_twopot <- function(x, y) {
+  model <- glm(x ~ twopotuse + race_collapsed + factor(SEROSTAT) + AGENOX + schooling + on_antidepressant + cesd_factor, data = y, family = "gaussian")
 }
 
-twopot_remlat <- final_model_twopot(final_data$remlat)
+rem_latency_twopot <- final_model_twopot(complete_rem$remlat, complete_rem)
+
+twopot_remlat <- formatted_results(twopot_remlat)
 twopot_remlat
 ```
+
 ```{r}
 #twopot and waso
 
-waso_twopot <- final_model_twopot(final_data$waso)
+waso_twopot <- final_model_twopot(complete_cases$waso, complete_cases)
+waso_twopot <- formatted_results(waso_twopot)
 waso_twopot
+```
+
+```{r}
+#sleep latency twopot
+sleep_latency_twopot <- final_model_twopot(complete_cases$slplat, complete_cases)
+
+sleep_latency_twopot <- formatted_results(sleep_latency_twopot)
+sleep_latency_twopot
 ```
 
 ```{r}
@@ -1033,6 +1221,232 @@ psqi_twopot
 ```
 
 ```{r}
+#export results
+batch_export_model_results <- function(results_list, file_name, output_dir = getwd()) {
+  
+  # Combine all results with a model label column
+  combined_results <- bind_rows(
+    lapply(names(results_list), function(model_name) {
+      results_list[[model_name]] %>%
+        mutate(model = model_name) %>%
+        select(model, everything())
+    })
+  ) %>%
+    mutate(
+      estimate     = round(estimate, 4),
+      std.error    = round(std.error, 4),
+      statistic    = round(statistic, 4),
+      p.value      = round(p.value, 4),
+      conf.low     = round(conf.low, 4),
+      conf.high    = round(conf.high, 4),
+      significance = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01  ~ "**",
+        p.value < 0.05  ~ "*",
+        p.value < 0.1   ~ ".",
+        TRUE            ~ ""
+      )
+    )
+  
+  # Build full file path
+  file_path <- file.path(output_dir, paste0(file_name, ".csv"))
+  
+  # Write to CSV
+  write.csv(combined_results, file = file_path, row.names = FALSE)
+  
+  message("Batch results exported to: ", file_path)
+  return(invisible(combined_results))
+}
 
+# Run all six models
+results_list <- list(rem_latency, sleep_latency, waso, rem_latency_twopot, sleep_latency_twopot, waso_twopot)
+
+
+# Batch export
+batch_export_model_results(
+  results_list = results_list,
+  file_name    = "all_sleep_model_results"
+)
+```
+
+```{r}
+#data request
+
+rzewnicki_request <- almost_final_data %>%
+  select(MACSID, VISIT)
+
+write.csv(rzewnicki_request, file = "rzewnicki_request.csv", row.names = FALSE)
+
+rzewnicki_request %>%
+  group_by(VISIT) %>%
+  count()
+```
+
+```{r}
+#inspect final data for missingness
+
+miss_var_summary(final_data)
+
+#only variable of interest with missing data is CES-D
+
+
+
+#impute data in remlat dataset (don't want to impute outcomes)
+install.packages("mice")
+library(mice)
+
+#remove cesd_factor
+impute_data <- rem_data %>%
+  select(-cesd_factor)
+
+imp <- mice(impute_data, m = 5, seed = 123)
+
+# Check imputation quality
+plot(imp)  # Convergence
+densityplot(imp)  # Distribution of imputations
+
+# Create dichotomized version
+imp_long <- complete(imp, "long", include = TRUE)
+imp_long$CESD_high <- as.factor(ifelse(imp_long$CESD >= 16, 1, 0))  # Example cutoff
+imp_final <- as.mids(imp_long)
+
+# Run analysis
+# Fit different models
+fit1 <- with(imp_final, glm(remlat ~ SLPWEED + race_collapsed + SEROSTAT + AGENOX + schooling + on_antidepressant + CESD_high, family = "gaussian"))
+fit2 <- with(imp_final, glm(slplat ~ SLPWEED + race_collapsed + SEROSTAT + AGENOX + schooling + on_antidepressant + CESD_high, family = "gaussian"))
+fit3 <- with(imp_final, glm(waso ~ SLPWEED + race_collapsed + SEROSTAT + AGENOX + schooling + on_antidepressant + CESD_high, family = "gaussian"))
+
+# Pool each
+pooled1 <- pool(fit1)
+pooled2 <- pool(fit2)
+pooled3 <- pool(fit3)
+
+# View results
+summary(pooled1)
+summary(pooled2)
+summary(pooled3)
+
+```
+## reporting findings
+
+Of note for the future: labelled package can be use to label variables with metadata that can be carried through to tables and figures with gtsummary 
+
+```{r}
+#label data
+
+library(labelled)
+
+final_data <- final_data %>%
+  set_variable_labels(
+    remlat = "REM Latency",
+    slplat = "Sleep Latency",
+    waso = "Wake After Sleep Onset",
+    AGENOX = "Age",
+    SLPWEED = "Cannabis Use Prior to Sleep",
+    race_collapsed = "Race",
+    SEROSTAT = "HIV Serostatus",
+    schooling = "Highest Education Level",
+    cesd_factor = "Depression",
+    twopotuse = "Average Cannabis Use",
+    on_antidepressant = "Using Antidepressants"
+  ) %>%
+  set_value_labels(
+    SLPWEED = c(
+      No = 1,
+      Yes = 2
+    ))
+    race_collapsed = c(
+      "White" = "White",
+      "Hispanic" = "Hispanic",
+      "Black" = "Black",
+      "Other" = "Other"
+    ),
+    SEROSTAT = c(
+      "HIV-" = "1",
+      "HIV+" = "2"
+    ),
+    schooling = c(
+      "Less than HS" = "Less than HS",
+      "HS or some College" = "HS or some College",
+      "College degree or more" = "College or more"
+    ),
+    cesd_factor = c(
+      "Not Depressed" = "1",
+      "Depressed" = "2"
+    ))
+    
+   
+```
+```{r}
+
+export_model_results <- function(model_results, output_dir = getwd()) {
+
+formatted_results <- model_results %>%
+  tidy_and_attach(conf.int = T) %>%
+  tidy_add_reference_rows %>%
+  dplyr::select(term, estimate, conf.low, conf.high, p.value)%>%
+  filter(term != "(Intercept)")%>%
+  mutate(term = case_when(term == "SLPWEED1" ~"Used Cannabis Prior to Sleep",
+                          term == "SLPWEED2" ~ "   Yes",
+                          term == "race_collapsedWhite" ~ "Race",
+                          term == "race_collapsedHispanic"~ "   Hispanic",
+                          term == "race_collapsedBlack" ~ "   Black", 
+                          term == "race_collapsedOther" ~ "   Other",
+                          term == "AGENOX" ~ "Age",
+                          term == "SEROSTAT1" ~ "HIV Serostatus",
+                          term == "SEROSTAT2" ~ "   HIV+",
+                          term == "schoolingLess than HS" ~ "Education Level",
+                          term == "schoolingHS or some college" ~ "   HS or some college",
+                          term == "schoolingCollege or more" ~ "   College or more",
+                          term == "on_antidepressant" ~ "Using antidepressants",
+                          term == "cesd_factor2" ~ "   Yes",
+                          term == "cesd_factor1" ~ "Depression",
+                          T ~ term))%>%
+  mutate(across(c(estimate:conf.high), ~round(., 2)))%>%
+  mutate(p.value = round(p.value, 3),
+         p.value = if_else(p.value <0.001, "<0.01",as.character(p.value)))%>%
+  unite("CI",conf.low, conf.high, sep="-")%>%
+  unite("estimate",estimate, CI, sep= " (")%>%
+  mutate(estimate = str_c(estimate, ")")) %>%
+   mutate(estimate = str_remove_all(estimate, fixed("NA (NA-NA)"))) %>%
+  replace_na(list(p.value = "", estimate = "")) %>%
+  rename(`expression(beta[1])` = estimate,
+                  Coefficient = term)
+
+#extract input name
+input_name <- deparse(substitute(model_results))
+ 
+# Build full file path
+  file_path <- file.path(output_dir, paste0(input_name, ".csv"))
+
+  
+  # Write to CSV
+  write.csv(formatted_results, file = file_path, row.names = FALSE)
+  message("Results exported to: ", file_path)
+  return(invisible(formatted_results))
+}
+
+results <- list(rem_latency, sleep_latency, waso, rem_latency_twopot, sleep_latency_twopot, waso_twopot)
+
+lapply(results, export_model_results)
+
+export_model_results(rem_latency)
+export_model_results(sleep_latency)
+export_model_results(waso)
+export_model_results(rem_latency_twopot)
+export_model_results(sleep_latency_twopot)
+export_model_results(waso_twopot)
+```
+
+```{r}
+#complete data
+
+complete_cases <- final_data %>%
+  filter(!is.na(cesd_factor))
+
+miss_var_summary(complete_cases)
+
+complete_rem <- complete_cases %>%
+  filter(!is.na(remlat))
 ```
 
